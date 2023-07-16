@@ -162,6 +162,7 @@ class FileWriter(object):
 thread_global = threading.local()
 DISABLED = bool(os.getenv('PYSNOOPER_DISABLED', ''))
 
+
 class Tracer:
     '''
     Snoop on the function, writing everything it's doing to stderr.
@@ -224,8 +225,16 @@ class Tracer:
     '''
     def __init__(self, output=None, watch=(), watch_explode=(), depth=1,
                  prefix='', overwrite=False, thread_info=False, custom_repr=(),
-                 max_variable_length=100, normalize=False, relative_time=False,
-                 color=True):
+                 max_variable_length=200, normalize=False, relative_time=False,
+                 color=False,
+                 indent_char='-', indent_add_level=0,
+                 show_timestamp=True, show_step_newish_value=True,
+                 function_show_name_insteadof_code=True,
+                 show_function_arguments=False, show_function_return_type=True,
+                 restricted_to_abspath=None,  # type: str
+                 ignore_paths=None,  # type: list[str]|tuple[str]
+                 ignore_trace_events=None  # type: list[str]|tuple[str]
+                 ):
         self._write = get_write_function(output, overwrite)
 
         self.watch = [
@@ -280,6 +289,20 @@ class Tracer:
             self._STYLE_DIM = ''
             self._STYLE_NORMAL = ''
             self._STYLE_RESET_ALL = ''
+
+        self.indent_char = indent_char
+        self.indent_add_level = indent_add_level
+        self.show_timestamp = show_timestamp
+        self.show_step_newish_value = show_step_newish_value
+        self.function_show_name_insteadof_code = function_show_name_insteadof_code
+        self.show_function_arguments = show_function_arguments
+        self.show_function_return_type = show_function_return_type
+        self.restricted_to_abspath = restricted_to_abspath
+        self.ignore_paths = ignore_paths
+        if self.ignore_paths:
+            self.__ignore_paths_dirs = tuple(os.path.abspath(p) for p in self.ignore_paths if os.path.isdir(p))
+            self.__ignore_paths_files = tuple(os.path.abspath(p) for p in self.ignore_paths if not os.path.isdir(p))
+        self.ignore_trace_events = ignore_trace_events
 
     def __call__(self, function_or_class):
         if DISABLED:
@@ -392,6 +415,26 @@ class Tracer:
 
     def trace(self, frame, event, arg):
 
+        if self.ignore_trace_events and (event in self.ignore_trace_events):
+            return
+
+        source_path, source = get_path_and_source_from_frame(frame)
+        if self.ignore_paths:
+            if source_path in self.__ignore_paths_files:
+                return
+            for p in self.__ignore_paths_dirs:
+                try:
+                    if os.path.commonpath((source_path, p)) == p:
+                        return
+                except:
+                    pass
+        if self.restricted_to_abspath:
+            if not source_path.startswith(self.restricted_to_abspath):
+                return
+            source_path = os.path.relpath(source_path, self.restricted_to_abspath)
+        if self.normalize:
+            source_path = os.path.basename(source_path)
+
         ### Checking whether we should trace this line: #######################
         #                                                                     #
         # We should trace this line either if it's in the decorated function,
@@ -422,7 +465,7 @@ class Tracer:
 
         if event == 'call':
             thread_global.depth += 1
-        indent = ' ' * 4 * thread_global.depth
+        indent = self.indent_char * 4 * (thread_global.depth + self.indent_add_level)
 
         _FOREGROUND_BLUE = self._FOREGROUND_BLUE
         _FOREGROUND_CYAN = self._FOREGROUND_CYAN
@@ -438,29 +481,33 @@ class Tracer:
 
         ### Making timestamp: #################################################
         #                                                                     #
-        if self.normalize:
-            timestamp = ' ' * 15
-        elif self.relative_time:
-            try:
-                start_time = self.start_times[frame]
-            except KeyError:
-                start_time = self.start_times[frame] = \
-                                                 datetime_module.datetime.now()
-            duration = datetime_module.datetime.now() - start_time
-            timestamp = pycompat.timedelta_format(duration)
+        if self.show_timestamp:
+            if self.normalize:
+                timestamp = ' ' * 15
+            elif self.relative_time:
+                try:
+                    start_time = self.start_times[frame]
+                except KeyError:
+                    start_time = self.start_times[frame] = \
+                                                     datetime_module.datetime.now()
+                duration = datetime_module.datetime.now() - start_time
+                timestamp = pycompat.timedelta_format(duration)
+            else:
+                timestamp = pycompat.time_isoformat(
+                    datetime_module.datetime.now().time(),
+                    timespec='microseconds'
+                )
+            timestamp += ' '
         else:
-            timestamp = pycompat.time_isoformat(
-                datetime_module.datetime.now().time(),
-                timespec='microseconds'
-            )
+            timestamp = ''
         #                                                                     #
         ### Finished making timestamp. ########################################
 
         line_no = frame.f_lineno
-        source_path, source = get_path_and_source_from_frame(frame)
-        source_path = source_path if not self.normalize else os.path.basename(source_path)
+        # source_path, source = get_path_and_source_from_frame(frame)
+        # source_path = source_path if not self.normalize else os.path.basename(source_path)
         if self.last_source_path != source_path:
-            self.write(u'{_FOREGROUND_YELLOW}{_STYLE_DIM}{indent}Source path:... '
+            self.write(u'{indent}{_FOREGROUND_YELLOW}{_STYLE_DIM}Source path:... '
                        u'{_STYLE_NORMAL}{source_path}'
                        u'{_STYLE_RESET_ALL}'.format(**locals()))
             self.last_source_path = source_path
@@ -477,49 +524,52 @@ class Tracer:
 
         ### Reporting newish and modified variables: ##########################
         #                                                                     #
-        old_local_reprs = self.frame_to_local_reprs.get(frame, {})
-        self.frame_to_local_reprs[frame] = local_reprs = \
-                                       get_local_reprs(frame,
-                                                       watch=self.watch, custom_repr=self.custom_repr,
-                                                       max_length=self.max_variable_length,
-                                                       normalize=self.normalize,
-                                                       )
+        if self.show_step_newish_value:
+            old_local_reprs = self.frame_to_local_reprs.get(frame, {})
+            self.frame_to_local_reprs[frame] = local_reprs = \
+                                           get_local_reprs(frame,
+                                                           watch=self.watch, custom_repr=self.custom_repr,
+                                                           max_length=self.max_variable_length,
+                                                           normalize=self.normalize,
+                                                           )
 
-        newish_string = ('Starting var:.. ' if event == 'call' else
-                                                            'New var:....... ')
+            newish_string = ('Starting var:.. ' if event == 'call' else
+                                                                'New var:....... ')
 
-        for name, value_repr in local_reprs.items():
-            if name not in old_local_reprs:
-                self.write('{indent}{_FOREGROUND_GREEN}{_STYLE_DIM}'
-                           '{newish_string}{_STYLE_NORMAL}{name} = '
-                           '{value_repr}{_STYLE_RESET_ALL}'.format(**locals()))
-            elif old_local_reprs[name] != value_repr:
-                self.write('{indent}{_FOREGROUND_GREEN}{_STYLE_DIM}'
-                           'Modified var:.. {_STYLE_NORMAL}{name} = '
-                           '{value_repr}{_STYLE_RESET_ALL}'.format(**locals()))
-
+            for name, value_repr in local_reprs.items():
+                if name not in old_local_reprs:
+                    self.write('{indent}{_FOREGROUND_GREEN}{_STYLE_DIM}'
+                               '{newish_string}{_STYLE_NORMAL}{name} = '
+                               '{value_repr}{_STYLE_RESET_ALL}'.format(**locals()))
+                elif old_local_reprs[name] != value_repr:
+                    # FIXME: BUG: str comparison in max_variable_length which will fail for middle-changed very long str
+                    self.write('{indent}{_FOREGROUND_GREEN}{_STYLE_DIM}'
+                               'Modified var:.. {_STYLE_NORMAL}{name} = '
+                               '{value_repr}{_STYLE_RESET_ALL}'.format(**locals()))
         #                                                                     #
         ### Finished newish and modified variables. ###########################
 
 
         ### Dealing with misplaced function definition: #######################
         #                                                                     #
-        if event == 'call' and source_line.lstrip().startswith('@'):
-            # If a function decorator is found, skip lines until an actual
-            # function definition is found.
-            for candidate_line_no in itertools.count(line_no):
-                try:
-                    candidate_source_line = source[candidate_line_no - 1]
-                except IndexError:
-                    # End of source file reached without finding a function
-                    # definition. Fall back to original source line.
-                    break
-
-                if candidate_source_line.lstrip().startswith('def'):
-                    # Found the def line!
-                    line_no = candidate_line_no
-                    source_line = candidate_source_line
-                    break
+        if event == 'call':
+            if source_line.lstrip().startswith('@'):
+                # If a function decorator is found, skip lines until an actual
+                # function definition is found.
+                for candidate_line_no in itertools.count(line_no):
+                    try:
+                        candidate_source_line = source[candidate_line_no - 1]
+                    except IndexError:
+                        # End of source file reached without finding a function
+                        # definition. Fall back to original source line.
+                        break
+                    if candidate_source_line.lstrip().startswith('def'):
+                        # Found the def line!
+                        line_no = candidate_line_no
+                        source_line = candidate_source_line
+                        break
+            if self.function_show_name_insteadof_code:
+                source_line = frame.f_code.co_name
         #                                                                     #
         ### Finished dealing with misplaced function definition. ##############
 
@@ -535,12 +585,31 @@ class Tracer:
                 and opcode.opname[code_byte] not in RETURN_OPCODES
         )
 
+        # if ended_by_exception:
+        #     self.write('{indent}{_FOREGROUND_RED}Call ended by exception{_STYLE_RESET_ALL}'.
+        #                format(**locals()))
+        # else:
+        _EVENT_COLOR = _FOREGROUND_RED if ended_by_exception else _STYLE_DIM
+        if True:
+            evt = 'except' if event == 'exception' else event  # less space
+            self.write(u'{indent}{_EVENT_COLOR}{timestamp}{thread_info}[{evt:6}'
+                       u'{line_no:4}]{_STYLE_RESET_ALL} {source_line}'.format(**locals()))
+            if self.show_function_arguments and event == 'call':
+                # FIXME: RecursionError: maximum recursion depth exceeded
+                try:
+                    func_arguments = {(name := frame.f_code.co_varnames[i]): frame.f_locals[name] for i in
+                                      range(frame.f_code.co_argcount)}
+                    if self.max_variable_length:
+                        func_arguments = utils.truncate(str(func_arguments), self.max_variable_length)
+                    self.write('{indent}{_FOREGROUND_CYAN}{_STYLE_DIM}'
+                               'Pass arguments: {_STYLE_NORMAL}{func_arguments}'
+                               '{_STYLE_RESET_ALL}'.
+                               format(**locals()))
+                except:
+                    pass
         if ended_by_exception:
-            self.write('{_FOREGROUND_RED}{indent}Call ended by exception{_STYLE_RESET_ALL}'.
+            self.write('{indent}{_FOREGROUND_RED}Call ended by exception{_STYLE_RESET_ALL}'.
                        format(**locals()))
-        else:
-            self.write(u'{indent}{_STYLE_DIM}{timestamp} {thread_info}{event:9} '
-                       u'{line_no:4}{_STYLE_RESET_ALL} {source_line}'.format(**locals()))
 
         if event == 'return':
             self.frame_to_local_reprs.pop(frame, None)
@@ -553,8 +622,9 @@ class Tracer:
                                                             max_length=self.max_variable_length,
                                                             normalize=self.normalize,
                                                             )
+                return_value_type = '{} '.format(type(arg)) if self.show_function_return_type else ''
                 self.write('{indent}{_FOREGROUND_CYAN}{_STYLE_DIM}'
-                           'Return value:.. {_STYLE_NORMAL}{return_value_repr}'
+                           'Return value:.. {_STYLE_NORMAL}{return_value_type}{return_value_repr}'
                            '{_STYLE_RESET_ALL}'.
                            format(**locals()))
 
