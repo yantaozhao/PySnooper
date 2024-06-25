@@ -231,7 +231,8 @@ class Tracer:
                  show_timestamp=True, show_step_newish_value=True,
                  function_show_name_insteadof_code=True,
                  show_function_arguments=False, show_function_return_type=True,
-                 restricted_to_abspath=None,  # type: str
+                 base_directory_abspath=None,  # type: str
+                 restricted_to_abspath=None,  # type: str  # TODO: support list[str]
                  ignore_paths=None,  # type: list[str]|tuple[str]
                  ignore_trace_events=None  # type: list[str]|tuple[str]
                  ):
@@ -297,6 +298,7 @@ class Tracer:
         self.function_show_name_insteadof_code = function_show_name_insteadof_code
         self.show_function_arguments = show_function_arguments
         self.show_function_return_type = show_function_return_type
+        self.base_directory_abspath = base_directory_abspath
         self.restricted_to_abspath = restricted_to_abspath
         self.ignore_paths = ignore_paths
         if self.ignore_paths:
@@ -429,11 +431,13 @@ class Tracer:
                 except:
                     pass
         if self.restricted_to_abspath:
-            if not source_path.startswith(self.restricted_to_abspath):
+            if not source_path.startswith(self.restricted_to_abspath):  # FIXME: commonpath
                 return
-            source_path = os.path.relpath(source_path, self.restricted_to_abspath)
         if self.normalize:
-            source_path = os.path.basename(source_path)
+            if self.base_directory_abspath:
+                source_path = os.path.relpath(source_path, self.base_directory_abspath)
+            else:
+                source_path = os.path.basename(source_path)
 
         ### Checking whether we should trace this line: #######################
         #                                                                     #
